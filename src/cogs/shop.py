@@ -7,7 +7,8 @@ from discord.ext import commands
 from utils.assets import MochiColor, MochiEmojis, error_embed, info_embed, success_embed
 
 
-int, page: int, total_pages: int):
+class ShopPaginationView(discord.ui.View):
+    def __init__(self, shop_cog, owner_id: int, page: int, total_pages: int):
         super().__init__(timeout=120)
         self.shop_cog = shop_cog
         self.owner_id = owner_id
@@ -395,4 +396,3 @@ class Shop(commands.Cog):
 
 async def setup(bot):
     await bot.add_cog(Shop(bot))
-
