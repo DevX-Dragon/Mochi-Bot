@@ -1,4 +1,5 @@
 import random
+from datetime import timedelta
 
 import discord
 from discord import app_commands
@@ -54,22 +55,75 @@ class Games(commands.Cog):
 
         stealer = self.bot.get_user(ctx.author.id)
         victim = self.bot.get_user(member.id)
+        now = self.bot.utcnow()
 
-        if victim["wallet"] <= 0:
-            await ctx.send(embed=error_embed("That member has no wallet cash to rob right now."))
+        hospital_until = stealer["cooldowns"].get("hospital_until")
+        if hospital_until and hospital_until > now:
+            remaining = int((hospital_until - now).total_seconds() // 60)
+            await ctx.send(embed=error_embed(f"{MochiEmojis.HOSPITAL} You are in the hospital for **{remaining}** more minutes."))
             return
 
-        if random.random() < 0.35:
-            stolen = random.randint(1, victim["wallet"] // 2 or 1)
+        visible_wallet = 0 if victim["protection"].get("fake_wallet") else victim["wallet"]
+        if visible_wallet <= 0:
+            await ctx.send(embed=error_embed("That member looks completely broke right now."))
+            return
+
+        if victim["inventory"].get("landmine", 0) > 0:
+            self.bot.add_item(victim, "landmine", -1)
+            fine = min(max(250, stealer["wallet"] // 4), stealer["wallet"])
+            stealer["wallet"] -= fine
+            stealer["stats"]["rob_failures"] += 1
+            stealer["cooldowns"]["hospital_until"] = now + timedelta(hours=2)
+            await ctx.send(
+                embed=error_embed(
+                    f"{MochiEmojis.HOSPITAL} {member.display_name}'s landmine detonated.\n"
+                    f"You lost **{fine:,}** bits and got sent to the hospital for 2 hours.",
+                    title="Robbery Failed",
+                )
+            )
+            return
+
+        if victim["inventory"].get("padlock", 0) > 0:
+            self.bot.add_item(victim, "padlock", -1)
+            stealer["stats"]["rob_failures"] += 1
+            await ctx.send(
+                embed=error_embed(
+                    f"{MochiEmojis.SHIELD} {member.display_name}'s padlock blocked the robbery.",
+                    title="Robbery Blocked",
+                )
+            )
+            return
+
+        shield_bonus = 0
+        if victim["protection"].get("shield_charges", 0) > 0:
+            victim["protection"]["shield_charges"] -= 1
+            shield_bonus = 0.18
+
+        success_rate = 0.35 - shield_bonus
+        if random.random() < max(0.1, success_rate):
+            stolen = random.randint(1, max(1, victim["wallet"] // 2))
             victim["wallet"] -= stolen
-            stealer["wallet"] += stolen
+            payout = stolen
+
+            bounty_amount = self.bot.server_state["bounties"].pop(member.id, 0)
+            if bounty_amount > 0:
+                payout += bounty_amount
+                treasury_cut = max(1, bounty_amount // 10)
+                payout -= treasury_cut
+                self.bot.server_state["treasury"] += treasury_cut
+
+            stealer["wallet"] += payout
+            stealer["stats"]["rob_successes"] += 1
             embed = success_embed(
                 f"{MochiEmojis.ROB} You robbed **{stolen:,}** bits from **{member.display_name}**!"
+                + (f"\n{MochiEmojis.TROPHY} Bounty claimed: **{bounty_amount:,}** bits" if bounty_amount else ""),
+                title="Robbery Success",
             )
         else:
             fine = min(150, stealer["wallet"])
             stealer["wallet"] -= fine
-            embed = error_embed(f"You got caught and paid a **{fine:,}** bit fine.")
+            stealer["stats"]["rob_failures"] += 1
+            embed = error_embed(f"You got caught and paid a **{fine:,}** bit fine.", title="Robbery Failed")
 
         await ctx.send(embed=embed)
 
@@ -87,7 +141,8 @@ class Games(commands.Cog):
             f"{MochiEmojis.LOTTERY} Ticket price: **{self.lottery_ticket_price:,}** bits\n"
             f"{MochiEmojis.CURRENCY} Current jackpot: **{self.lottery_pot:,}** bits\n"
             f"{MochiEmojis.PAGE} Tickets sold: **{len(self.lottery_entries)}**\n"
-            f"{MochiEmojis.PROFILE} Players entered: **{unique_players}**\n\n"
+            f"{MochiEmojis.PROFILE} Players entered: **{unique_players}**\n"
+            f"{MochiEmojis.TAX} Treasury reserve: **{self.bot.server_state['treasury']:,}** bits\n\n"
             f"{MochiEmojis.TROPHY} Last winner: {last_winner_line}",
             title="Lottery Board",
             color=MochiColor.GOLD,
@@ -108,7 +163,9 @@ class Games(commands.Cog):
             return
 
         user["wallet"] -= total_cost
-        self.lottery_pot += total_cost
+        treasury_share = total_cost // 5
+        self.lottery_pot += total_cost - treasury_share
+        self.bot.server_state["treasury"] += treasury_share
         self.lottery_entries.extend([ctx.author.id] * quantity)
 
         embed = success_embed(
@@ -131,7 +188,7 @@ class Games(commands.Cog):
         winner_id = random.choice(self.lottery_entries)
         winner = self.bot.get_user(winner_id)
         ticket_count = self.lottery_entries.count(winner_id)
-        prize = self.lottery_pot
+        prize = self.lottery_pot + min(self.bot.server_state["treasury"] // 4, 5000)
         winner["wallet"] += prize
         self.last_lottery_winner = {"user_id": winner_id, "prize": prize, "tickets": ticket_count}
 
